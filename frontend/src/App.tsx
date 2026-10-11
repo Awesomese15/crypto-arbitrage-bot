@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Activity, ArrowDownToLine, CircleStop, Play, RefreshCw, ShieldCheck, Wifi } from 'lucide-react'
 
 const API = 'http://127.0.0.1:8000/api'
+const ROUTE_A = 'Route A: USDT -> BTC -> ETH -> USDT'
+const ROUTE_B = 'Route B: USDT -> ETH -> BTC -> USDT'
 type Route = { route: string; final_usdt: string | null; net_pct: string | null; gross_pct_estimate: string | null; status: string; reason: string }
 type Book = { best_bid: string | null; best_ask: string | null; spread: string | null; last_update_id: number; received_at: string }
 type Scan = { scan_finished_at: string; receive_time_skew_seconds: number; books: Record<string, Book>; routes: Route[] }
@@ -28,6 +30,8 @@ function App() {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [form, setForm] = useState({ starting_amount: '100', fee_rate: '0.001', safety_threshold_pct: '0.05', poll_interval_seconds: '5' })
+  const configInitialized = useRef(false)
+  const formDirty = useRef(false)
 
   const load = useCallback(async () => {
     try {
@@ -36,6 +40,15 @@ function App() {
         request<{ observations: Observation[] }>(`/observations?limit=50${routeFilter ? `&route=${encodeURIComponent(routeFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}`),
       ])
       setStatus(nextStatus); setObservations(history.observations); setError(nextStatus.last_error ?? '')
+      if (!configInitialized.current && !formDirty.current) {
+        setForm({
+          starting_amount: String(nextStatus.config.starting_amount),
+          fee_rate: String(nextStatus.config.fee_rate),
+          safety_threshold_pct: String(nextStatus.config.safety_threshold_pct),
+          poll_interval_seconds: String(nextStatus.config.poll_interval_seconds),
+        })
+        configInitialized.current = true
+      }
     } catch (err) { setError(err instanceof Error ? err.message : 'Dashboard API unavailable') }
   }, [routeFilter, statusFilter])
 
@@ -54,10 +67,10 @@ function App() {
     <main>
       <section className="hero"><div><div className="eyebrow">MARKET INTELLIGENCE</div><h2>Arbitrage radar</h2><p>Research-grade route observations with execution safeguards enabled.</p></div><div className="control-row"><button className="button primary" disabled={busy || status?.running} onClick={() => void action('/monitor/start')}><Play size={16} /> Start monitoring</button><button className="button" disabled={busy || !status?.running} onClick={() => void action('/monitor/stop')}><CircleStop size={16} /> Stop</button><button className="button" disabled={busy || status?.running} onClick={() => void action('/scan')}><ArrowDownToLine size={16} /> One-shot scan</button></div></section>
       {error && <div className="alert">{error}</div>}
-      <section className="config-strip"><div><div className="eyebrow">SCAN CONFIGURATION</div><strong>Observation inputs</strong><span>Changes apply when monitoring is stopped.</span></div><label>Amount (USDT)<input type="number" min="0.000001" step="any" value={form.starting_amount} onChange={(e) => setForm({ ...form, starting_amount: e.target.value })} /></label><label>Fee / leg<input type="number" min="0" max="1" step="0.0001" value={form.fee_rate} onChange={(e) => setForm({ ...form, fee_rate: e.target.value })} /></label><label>Threshold (%)<input type="number" min="0" max="100" step="0.001" value={form.safety_threshold_pct} onChange={(e) => setForm({ ...form, safety_threshold_pct: e.target.value })} /></label><label>Polling (seconds)<input type="number" min="1" max="3600" step="1" value={form.poll_interval_seconds} onChange={(e) => setForm({ ...form, poll_interval_seconds: e.target.value })} /></label><button className="button" disabled={busy || status?.running} onClick={() => void saveConfig()}>Save config</button></section>
+      <section className="config-strip"><div><div className="eyebrow">SCAN CONFIGURATION</div><strong>Observation inputs</strong><span>Changes apply when monitoring is stopped.</span></div><label>Amount (USDT)<input type="number" min="0.000001" step="any" value={form.starting_amount} onChange={(e) => { formDirty.current = true; setForm({ ...form, starting_amount: e.target.value }) }} /></label><label>Fee / leg<input type="number" min="0" max="1" step="0.0001" value={form.fee_rate} onChange={(e) => { formDirty.current = true; setForm({ ...form, fee_rate: e.target.value }) }} /></label><label>Threshold (%)<input type="number" min="0" max="100" step="0.001" value={form.safety_threshold_pct} onChange={(e) => { formDirty.current = true; setForm({ ...form, safety_threshold_pct: e.target.value }) }} /></label><label>Polling (seconds)<input type="number" min="1" max="3600" step="1" value={form.poll_interval_seconds} onChange={(e) => { formDirty.current = true; setForm({ ...form, poll_interval_seconds: e.target.value }) }} /></label><button className="button" disabled={busy || status?.running} onClick={() => void saveConfig()}>Save config</button></section>
       <section className="cards"><Card title="Scanner status" value={status?.running ? 'Monitoring' : 'Idle'} meta={status?.running ? 'Polling public depth data' : 'Ready for observation'} tone={status?.running ? 'green' : 'neutral'} /><Card title="Latest scan" value={scan ? new Date(scan.scan_finished_at).toLocaleTimeString() : 'Unavailable'} meta={scan ? new Date(scan.scan_finished_at).toLocaleDateString() : 'No scan recorded'} /><Card title="Starting amount" value={config ? `${config.starting_amount} USDT` : 'Unavailable'} meta="Observation input" /><Card title="Receive-time skew" value={scan ? `${scan.receive_time_skew_seconds.toFixed(3)}s` : 'Unavailable'} meta={scan ? `Guard: ${config?.receive_skew_threshold_seconds}s` : 'Client timestamps only'} tone={scan && config && scan.receive_time_skew_seconds > config.receive_skew_threshold_seconds ? 'red' : 'neutral'} /></section>
       <section className="grid-two"><Panel title="Route comparison" subtitle="Simulated estimates after assumed fees"><div className="route-grid"><RouteCard route={routeA} /><RouteCard route={routeB} /></div></Panel><Panel title="Market overview" subtitle="Best levels from latest public depth fetch"><div className="market-list">{Object.entries(scan?.books ?? {}).map(([symbol, book]) => <div className="market-row" key={symbol}><div><strong>{symbol}</strong><span className="muted">Update {book.last_update_id} · spread {book.spread ?? '—'}</span></div><div className="quote"><span className="bid">{book.best_bid ?? '—'}</span><span className="ask">{book.best_ask ?? '—'}</span><small>{new Date(book.received_at).toLocaleTimeString()}</small></div></div>)}{!scan && <div className="empty">Run a scan to load market data.</div>}</div></Panel></section>
-      <Panel title="Observation history" subtitle="Read-only view of paper_observations.csv"><div className="filters"><select value={routeFilter} onChange={(e) => setRouteFilter(e.target.value)}><option value="">All routes</option><option value="Route A: USDT → BTC → ETH → USDT">Route A: USDT → BTC → ETH → USDT</option><option value="Route B: USDT → ETH → BTC → USDT">Route B: USDT → ETH → BTC → USDT</option></select><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option><option>CANDIDATE</option><option>REJECTED</option><option>INCOMPLETE</option></select></div><div className="table-wrap"><table><thead><tr><th>Timestamp</th><th>Route</th><th>Status</th><th>Estimated ending</th><th>Return</th><th>Reason</th></tr></thead><tbody>{observations.map((row, index) => <tr key={`${row.timestamp}-${index}`}><td>{row.timestamp ? new Date(row.timestamp).toLocaleString() : '—'}</td><td>{labelRoute(row.route)}</td><td><span className={`status ${row.status?.toLowerCase()}`}>{row.status}</span></td><td>{money(row.estimated_ending_balance || null)}</td><td>{pct(row.return_pct || null)}</td><td className="muted">{row.reason || '—'}</td></tr>)}</tbody></table>{!observations.length && <div className="empty">No observations match the current filters.</div>}</div></Panel>
+      <Panel title="Observation history" subtitle="Read-only view of paper_observations.csv"><div className="filters"><select value={routeFilter} onChange={(e) => setRouteFilter(e.target.value)}><option value="">All routes</option><option value={ROUTE_A}>Route A: USDT → BTC → ETH → USDT</option><option value={ROUTE_B}>Route B: USDT → ETH → BTC → USDT</option></select><select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}><option value="">All statuses</option><option>CANDIDATE</option><option>REJECTED</option><option>INCOMPLETE</option></select></div><div className="table-wrap"><table><thead><tr><th>Timestamp</th><th>Route</th><th>Status</th><th>Estimated ending</th><th>Return</th><th>Reason</th></tr></thead><tbody>{observations.map((row, index) => <tr key={`${row.timestamp}-${index}`}><td>{row.timestamp ? new Date(row.timestamp).toLocaleString() : '—'}</td><td>{labelRoute(row.route)}</td><td><span className={`status ${row.status?.toLowerCase()}`}>{row.status}</span></td><td>{money(row.estimated_ending_balance || null)}</td><td>{pct(row.return_pct || null)}</td><td className="muted">{row.reason || '—'}</td></tr>)}</tbody></table>{!observations.length && <div className="empty">No observations match the current filters.</div>}</div></Panel>
       <footer><Wifi size={14} /> Local dashboard · backend expected at 127.0.0.1 · Real orders disabled</footer>
     </main>
   </div>
