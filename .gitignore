@@ -4,3 +4,7 @@ __pycache__/
 .DS_Store
 paper_observations.csv
 paper_trades.csv
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+.vite/
