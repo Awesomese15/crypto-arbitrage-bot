@@ -10,10 +10,17 @@ type Book = { best_bid: string | null; best_ask: string | null; spread: string |
 type Scan = { scan_finished_at: string; receive_time_skew_seconds: number; books: Record<string, Book>; routes: Route[] }
 type Status = { running: boolean; config: { starting_amount: string; fee_rate: string; safety_threshold_pct: string; poll_interval_seconds: number; receive_skew_threshold_seconds: number }; latest_scan: Scan | null; last_error: string | null }
 type Observation = Record<string, string>
+type ConfigForm = { starting_amount: string; fee_rate: string; safety_threshold_pct: string; poll_interval_seconds: string }
 
 const labelRoute = (route: string) => route.startsWith('Route A') ? 'Route A' : 'Route B'
 const pct = (value: string | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(4)}%`
 const money = (value: string | null) => value == null ? 'Unavailable' : `${Number(value).toFixed(6)} USDT`
+const configFormFromStatus = (config: Status['config']): ConfigForm => ({
+  starting_amount: String(config.starting_amount),
+  fee_rate: String(config.fee_rate),
+  safety_threshold_pct: String(config.safety_threshold_pct),
+  poll_interval_seconds: String(config.poll_interval_seconds),
+})
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, { headers: { 'Content-Type': 'application/json' }, ...options })
@@ -29,32 +36,26 @@ function App() {
   const [statusFilter, setStatusFilter] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [form, setForm] = useState({ starting_amount: '100', fee_rate: '0.001', safety_threshold_pct: '0.05', poll_interval_seconds: '5' })
+  const [form, setForm] = useState<ConfigForm>({ starting_amount: '100', fee_rate: '0.001', safety_threshold_pct: '0.05', poll_interval_seconds: '5' })
   const configInitialized = useRef(false)
   const formDirty = useRef(false)
 
   const load = useCallback(async () => {
     try {
-      const [nextStatus, history] = await Promise.all([
-        request<Status>('/status'),
-        request<{ observations: Observation[] }>(`/observations?limit=50${routeFilter ? `&route=${encodeURIComponent(routeFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}`),
-      ])
-      setStatus(nextStatus); setObservations(history.observations); setError(nextStatus.last_error ?? '')
-      if (!configInitialized.current && !formDirty.current) {
-        setForm({
-          starting_amount: String(nextStatus.config.starting_amount),
-          fee_rate: String(nextStatus.config.fee_rate),
-          safety_threshold_pct: String(nextStatus.config.safety_threshold_pct),
-          poll_interval_seconds: String(nextStatus.config.poll_interval_seconds),
-        })
+      const nextStatus = await request<Status>('/status')
+      setStatus(nextStatus); setError(nextStatus.last_error ?? '')
+      if (!configInitialized.current) {
+        if (!formDirty.current) setForm(configFormFromStatus(nextStatus.config))
         configInitialized.current = true
       }
+      const history = await request<{ observations: Observation[] }>(`/observations?limit=50${routeFilter ? `&route=${encodeURIComponent(routeFilter)}` : ''}${statusFilter ? `&status=${encodeURIComponent(statusFilter)}` : ''}`)
+      setObservations(history.observations)
     } catch (err) { setError(err instanceof Error ? err.message : 'Dashboard API unavailable') }
   }, [routeFilter, statusFilter])
 
   useEffect(() => { void load(); const timer = window.setInterval(() => void load(), 5000); return () => window.clearInterval(timer) }, [load])
   const action = async (path: string) => { setBusy(true); setError(''); try { await request(path, { method: 'POST' }); await load() } catch (err) { setError(err instanceof Error ? err.message : 'Action failed') } finally { setBusy(false) } }
-  const saveConfig = async () => { setBusy(true); setError(''); try { await request('/config', { method: 'POST', body: JSON.stringify({ starting_amount: Number(form.starting_amount), fee_rate: Number(form.fee_rate), safety_threshold_pct: Number(form.safety_threshold_pct), poll_interval_seconds: Number(form.poll_interval_seconds) }) }); await load() } catch (err) { setError(err instanceof Error ? err.message : 'Configuration update failed') } finally { setBusy(false) } }
+  const saveConfig = async () => { setBusy(true); setError(''); try { const saved = await request<Status['config']>('/config', { method: 'POST', body: JSON.stringify({ starting_amount: Number(form.starting_amount), fee_rate: Number(form.fee_rate), safety_threshold_pct: Number(form.safety_threshold_pct), poll_interval_seconds: Number(form.poll_interval_seconds) }) }); setForm(configFormFromStatus(saved)); formDirty.current = false; configInitialized.current = true; await load() } catch (err) { setError(err instanceof Error ? err.message : 'Configuration update failed') } finally { setBusy(false) } }
 
   const scan = status?.latest_scan
   const routes = scan?.routes ?? []

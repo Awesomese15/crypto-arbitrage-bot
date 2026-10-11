@@ -7,3 +7,4 @@ paper_trades.csv
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
+.vite/
