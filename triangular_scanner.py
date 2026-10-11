@@ -18,6 +18,7 @@ FEE_RATE = Decimal("0.001")  # Assumed 0.1% per leg
 SAFETY_MARGIN_PCT = Decimal("0.05")  # 0.05% net return
 DEPTH_LIMIT = 100
 POLL_INTERVAL_SECONDS = 5
+BOOK_RECEIVE_SKEW_THRESHOLD_SECONDS = 2
 
 SYMBOLS = ["BTCUSDT", "ETHBTC", "ETHUSDT"]
 
@@ -58,12 +59,18 @@ def fetch_depth(session, symbol):
     }
 
 
+def calculate_receive_time_skew(books):
+    """Return client receive-time skew across the fetched order books."""
+    received_times = [book["received_at"] for book in books.values()]
+    return max(received_times) - min(received_times)
+
+
 # --------------------------------------------------
 # Buy base currency using quote currency
 # Example: USDT -> BTC using BTCUSDT asks
 # --------------------------------------------------
 
-def buy_base_with_quote(quote_amount, asks):
+def buy_base_with_quote(quote_amount, asks, fee_factor=FEE_FACTOR):
     remaining_quote = quote_amount
     base_received = ZERO
 
@@ -89,7 +96,7 @@ def buy_base_with_quote(quote_amount, asks):
         return None
 
     # Assumes fee is deducted from received base currency.
-    return base_received * FEE_FACTOR
+    return base_received * fee_factor
 
 
 # --------------------------------------------------
@@ -97,7 +104,7 @@ def buy_base_with_quote(quote_amount, asks):
 # Example: BTC -> USDT using BTCUSDT bids
 # --------------------------------------------------
 
-def sell_base_for_quote(base_amount, bids):
+def sell_base_for_quote(base_amount, bids, fee_factor=FEE_FACTOR):
     remaining_base = base_amount
     quote_received = ZERO
 
@@ -122,7 +129,7 @@ def sell_base_for_quote(base_amount, bids):
         return None
 
     # Assumes fee is deducted from received quote currency.
-    return quote_received * FEE_FACTOR
+    return quote_received * fee_factor
 
 
 # --------------------------------------------------
@@ -150,38 +157,43 @@ def report_rejection(name, reason):
 # Simulate one triangular arbitrage route
 # --------------------------------------------------
 
-def evaluate_route(name, route, books):
+def evaluate_route(
+    name,
+    route,
+    books,
+    start_usdt=STARTING_USDT,
+    fee_factor=FEE_FACTOR,
+    safety_margin_pct=SAFETY_MARGIN_PCT,
+):
     btcusdt = books["BTCUSDT"]
     ethbtc = books["ETHBTC"]
     ethusdt = books["ETHUSDT"]
 
-    start_usdt = STARTING_USDT
-
     if route == "A":
         # USDT -> BTC -> ETH -> USDT
-        btc = buy_base_with_quote(start_usdt, btcusdt["asks"])
+        btc = buy_base_with_quote(start_usdt, btcusdt["asks"], fee_factor)
         if btc is None:
             return report_rejection(name, "Insufficient BTCUSDT ask depth")
 
-        eth = buy_base_with_quote(btc, ethbtc["asks"])
+        eth = buy_base_with_quote(btc, ethbtc["asks"], fee_factor)
         if eth is None:
             return report_rejection(name, "Insufficient ETHBTC ask depth")
 
-        final_usdt = sell_base_for_quote(eth, ethusdt["bids"])
+        final_usdt = sell_base_for_quote(eth, ethusdt["bids"], fee_factor)
         if final_usdt is None:
             return report_rejection(name, "Insufficient ETHUSDT bid depth")
 
     elif route == "B":
         # USDT -> ETH -> BTC -> USDT
-        eth = buy_base_with_quote(start_usdt, ethusdt["asks"])
+        eth = buy_base_with_quote(start_usdt, ethusdt["asks"], fee_factor)
         if eth is None:
             return report_rejection(name, "Insufficient ETHUSDT ask depth")
 
-        btc = sell_base_for_quote(eth, ethbtc["bids"])
+        btc = sell_base_for_quote(eth, ethbtc["bids"], fee_factor)
         if btc is None:
             return report_rejection(name, "Insufficient ETHBTC bid depth")
 
-        final_usdt = sell_base_for_quote(btc, btcusdt["bids"])
+        final_usdt = sell_base_for_quote(btc, btcusdt["bids"], fee_factor)
         if final_usdt is None:
             return report_rejection(name, "Insufficient BTCUSDT bid depth")
 
@@ -194,12 +206,12 @@ def evaluate_route(name, route, books):
 
     # Diagnostic estimate only: reverse the assumed fee factors.
     # This is not an independently simulated gross execution result.
-    gross_final_estimate = final_usdt / (FEE_FACTOR ** 3)
+    gross_final_estimate = final_usdt / (fee_factor ** 3)
     gross_pct_estimate = (
         (gross_final_estimate / start_usdt) - ONE
     ) * HUNDRED
 
-    eligible = net_pct > SAFETY_MARGIN_PCT
+    eligible = net_pct > safety_margin_pct
     status = "CANDIDATE" if eligible else "REJECTED"
 
     print(f"\n{name}")
@@ -236,6 +248,10 @@ def main():
     print(f"Assumed fee per leg: {FEE_RATE * HUNDRED}%")
     print(f"Minimum net return: > {SAFETY_MARGIN_PCT}%")
     print(f"Polling interval: {POLL_INTERVAL_SECONDS} seconds")
+    print(
+        "Provisional client receive-time skew threshold: "
+        f"{BOOK_RECEIVE_SKEW_THRESHOLD_SECONDS} seconds"
+    )
     print("=" * 65)
 
     ledger = PaperLedger()
@@ -264,6 +280,12 @@ def main():
                     f"{(scan_finished_at - scan_started_at).total_seconds():.3f}s"
                 )
 
+                receive_time_skew = calculate_receive_time_skew(books)
+                print(
+                    "Client receive-time skew: "
+                    f"{receive_time_skew.total_seconds():.3f}s"
+                )
+
                 for symbol, book in books.items():
                     print(
                         f"{symbol}: "
@@ -273,18 +295,25 @@ def main():
                         f"asks={len(book['asks'])}"
                     )
 
-                results = [
-                    evaluate_route(
-                        "Route A: USDT -> BTC -> ETH -> USDT",
-                        "A",
-                        books,
-                    ),
-                    evaluate_route(
-                        "Route B: USDT -> ETH -> BTC -> USDT",
-                        "B",
-                        books,
-                    ),
+                route_names = [
+                    ("Route A: USDT -> BTC -> ETH -> USDT", "A"),
+                    ("Route B: USDT -> ETH -> BTC -> USDT", "B"),
                 ]
+
+                if receive_time_skew.total_seconds() > BOOK_RECEIVE_SKEW_THRESHOLD_SECONDS:
+                    print(
+                        "Routes marked incomplete: client receive-time skew "
+                        "exceeded the provisional threshold."
+                    )
+                    results = [
+                        report_rejection(name, "BOOK_RECEIVE_SKEW_EXCEEDED")
+                        for name, _ in route_names
+                    ]
+                else:
+                    results = [
+                        evaluate_route(name, route, books)
+                        for name, route in route_names
+                    ]
 
                 candidates = 0
 
@@ -320,7 +349,11 @@ def main():
                 print("\nScanner stopped by user.")
                 break
 
-            time.sleep(POLL_INTERVAL_SECONDS)
+            try:
+                time.sleep(POLL_INTERVAL_SECONDS)
+            except KeyboardInterrupt:
+                print("\nScanner stopped by user.")
+                break
 
 
 if __name__ == "__main__":
